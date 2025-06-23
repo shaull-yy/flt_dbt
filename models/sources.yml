@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: stg
+    schema: flt_stg
+    tables:
+    - name: airports_data
+      identifier: airports_data
+    - name: aircrafts_data
+    - name: boarding_passes
+      identifier: boarding_passes
+    - name: bookings
+    - name: flights
+    - name: seats
+    - name: ticket_flights
+    - name: tickets
+      

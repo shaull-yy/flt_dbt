@@ -1,0 +1,59 @@
+
+# Name your project! Project names should contain only lowercase characters
+# and underscores. A good package name should reflect your organization's
+# name or the intended use of these models
+name: 'flight_dbt'
+version: '1.0.0'
+
+# This setting configures which "profile" dbt uses for this project.
+profile: 'flight_dbt'
+
+vars:
+  init_date: '1900-01-01'
+
+# These configurations specify where dbt should look for different types of files.
+# The `model-paths` config, for example, states that models in this project can be
+# found in the "models/" directory. You probably won't need to change these!
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:         # directories to be removed by `dbt clean`
+  - "target"
+  - "dbt_packages"
+
+
+on-run-start:
+  - create schema if not exists {{target.schema}}
+  - create table if not exists  {{target.schema}}.z_refresh_from (table_name varchar(50), from_date date, to_refresh integer);
+  - create table if not exists {{target.schema}}.dbt_log (id varchar(50), model varchar(50), start_date TIMESTAMP,	end_date TIMESTAMP,	run_duration INTERVAL, run_dur_sec integer, etl_date_utc TIMESTAMP);
+  - insert into {{target.schema}}.dbt_log (id, model, start_date, end_date, run_duration, run_dur_sec, etl_date_utc) values('{{ invocation_id}}', null, '{{ run_started_at }}'::timestamp, null, null, null, '{{ run_started_at }}'::timestamp);
+
+on-run-end:
+  - update {{target.schema}}.dbt_log set end_date =  clock_timestamp(), run_duration = clock_timestamp() - start_date, run_dur_sec = EXTRACT(EPOCH FROM (clock_timestamp() - start_date)) where id = '{{ invocation_id}}' and model is null;
+# Configuring models
+# Full documentation: https://docs.getdbt.com/docs/configuring-models
+
+# In this example config, we tell dbt to build all models in the example/
+# directory as views. These settings can be overridden in the individual model
+# files using the `{{ config(...) }}` macro.
+models:
+  flight_dbt:
+    # Config indicated by + and applies to all files under models/example/
+    example:
+      +materialized: view
+      +schema: example
+      +enabled: false
+    dim:
+      +materialized: incremental
+      +pre-hook: "{{ delete_from() }}"  #delete from {{this}}
+      +schema: dim
+    fact:
+      +materialized: incremental
+      +schema: fact
+    seeds:
+  sakila_dbt:
+    +schema: seed
