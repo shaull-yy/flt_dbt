@@ -6,7 +6,7 @@
 	)
 }}
 
-with z_refresh_from as(
+with manual_ref_dt as(
 select z.from_date
 from {{target.schema}}.z_refresh_from as z
 where z.to_refresh = 1
@@ -14,67 +14,61 @@ where z.to_refresh = 1
 ),
 {% if is_incremental() %}
 null_rows as (
-select flight_id
-from {{this}} 
+select stg_flt_minu1.*
+from {{this}} as fact_flt
+inner join {{ source('stg', 'flights') }} as stg_flt_minu1 on fact_flt.flight_id = stg_flt_minu1.flight_id
 where 
-	aircraft_code = '-1' 
-	or arrival_airport = '-1'
-	or departure_airport = '-1'
+	fact_flt.aircraft_code = '-1' 
+	or fact_flt.arrival_airport = '-1'
+	or fact_flt.departure_airport = '-1'
 ),
 {% endif %}
-calc_data as (
+stg_flt_tb as (
 select
-	f.flight_id
-	,f.status
-    ,round(extract(epoch from f.scheduled_arrival - f.scheduled_departure)/3600,2)  as flt_duration_expected_hr
-    ,round(extract(epoch from f.actual_arrival - f.actual_departure)/3600,2)  as flt_duration_actual_hr
-    ,case when ac.aircraft_code is null then '-1'
-         else ac.aircraft_code
-    end as aircraft_code_tmp
-    ,case when aparr.airport_code is null then '-1'
-         else aparr.airport_code
-    end as arrival_airport_tmp
-    ,case when apdep.airport_code is null then '-1'
-         else apdep.airport_code
-    end as departure_airport_tmp
-from {{ source('stg', 'flights') }} as f
-left join {{ source('stg', 'aircrafts_data') }} as ac  on f.aircraft_code = ac.aircraft_code
-left join {{ source('stg', 'airports_data') }}  as aparr  on f.arrival_airport = aparr.airport_code
-left join {{ source('stg', 'airports_data') }} as apdep  on f.departure_airport = apdep.airport_code
+	stg_flt.*
+from {{ source('stg', 'flights') }} as stg_flt
 {% if is_incremental() %}
-inner join z_refresh_from as z_refresh_from on 1 = 1
+left join manual_ref_dt as manual_ref_dt on 1 = 1
 where 1 = 1
-	and f.last_update >= COALESCE(
-		z_refresh_from.from_date
+	and stg_flt.last_update > COALESCE(
+		manual_ref_dt.from_date
 		,(select max(last_update) from {{this}})
 		,'{{ var('init_date') }}'
 	)
 {% endif %}
 ),
-base_flt as (
-select 
-	f2.flight_id, f2.flight_no, f2.scheduled_departure, f2.scheduled_arrival, f2.status, f2.actual_departure, f2.actual_arrival, f2.last_update
-	,calcd.aircraft_code_tmp as aircraft_code
-	,calcd.arrival_airport_tmp as arrival_airport
-	,calcd.departure_airport_tmp as departure_airport
-    ,calcd.flt_duration_expected_hr
-    ,calcd.flt_duration_actual_hr
-    ,case when flt_duration_actual_hr is null then 'NA'
-	      when calcd.flt_duration_expected_hr < calcd.flt_duration_actual_hr then 'longer'
-          when calcd.flt_duration_expected_hr = calcd.flt_duration_actual_hr then 'as expected'
-          when calcd.flt_duration_expected_hr < calcd.flt_duration_actual_hr then 'shorter'
-     end as flight_duration_ind
-	,'{{ run_started_at }}'::timestamp AT TIME ZONE 'UTC'  as etl_time_utc
-from {{ source('stg', 'flights') }} as f2
-inner join calc_data as calcd  on f2.flight_id = calcd.flight_id
-)
-select
-	bf1.*
-from base_flt as bf1
+combined_stg_flt as (
+select	stg_flt_tb.* from stg_flt_tb
 {% if is_incremental() %}
 union
-select 
-	bf2.*
-from base_flt as bf2
-inner join null_rows as null_rows  on bf2.flight_id = null_rows.flight_id
+select null_rows.* from null_rows
 {% endif %}
+),
+calc_data as (
+select
+	f.flight_id, f.flight_no, f.scheduled_departure, f.scheduled_arrival, f.status, f.actual_departure, f.actual_arrival, f.last_update
+    ,round(extract(epoch from f.scheduled_arrival - f.scheduled_departure)/3600,2)  as flt_duration_expected_hr
+    ,round(extract(epoch from f.actual_arrival - f.actual_departure)/3600,2)  as flt_duration_actual_hr
+    ,case when air_crft.aircraft_code is null then '-1'
+         else f.aircraft_code
+    end as aircraft_code
+    ,case when arrive_port.airport_code is null then '-1'
+         else f.arrival_airport
+    end as arrival_airport
+    ,case when depart_port.airport_code is null then '-1'
+         else f.departure_airport
+    end as departure_airport
+from combined_stg_flt as f
+left join {{ source('stg', 'aircrafts_data') }} as air_crft    on f.aircraft_code = air_crft.aircraft_code
+left join {{ source('stg', 'airports_data') }}  as arrive_port on arrive_port.airport_code = f.arrival_airport
+left join {{ source('stg', 'airports_data') }}  as depart_port on depart_port.airport_code = f.departure_airport
+)
+select 
+	f2.*
+    ,case when f2.flt_duration_actual_hr is null then 'NA'
+	      when f2.flt_duration_expected_hr < f2.flt_duration_actual_hr then 'longer'
+          when f2.flt_duration_expected_hr = f2.flt_duration_actual_hr then 'as expected'
+          when f2.flt_duration_expected_hr < f2.flt_duration_actual_hr then 'shorter'
+     end as flight_duration_ind
+	,'{{ run_started_at }}'::timestamp AT TIME ZONE 'UTC'  as etl_time_utc
+from calc_data as f2
